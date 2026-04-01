@@ -1,1 +1,11 @@
-pip install pyTelegramBotAPI flask psutil schedule werkzeug
+# requirements.txt ফাইল তৈরি করুন
+cat > requirements.txt << EOF
+pyTelegramBotAPI==4.8.0
+flask==2.3.3
+psutil==5.9.6
+schedule==1.2.0
+werkzeug==2.3.7
+EOF
+
+# তারপর ইনস্টল করুন
+pip install -r requirements.txt
