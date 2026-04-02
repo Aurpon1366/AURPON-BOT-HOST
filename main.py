@@ -32,9 +32,1572 @@ class Config:
     ADMIN_ID = int(os.environ.get('ADMIN_ID', 6487613131))
     PORT = int(os.environ.get('PORT', 10000))
     PROJECT_DIR = 'projects'
-    DB_NAME = 'aurpon_bot.db'
+    DB_NAME = 'aurpon_advanced.db'
     
     BRAND_NAME = "✨ 𝐀𝐔𝐑𝐏𝐎𝐍 𝐃𝐄𝐗 𝐏𝐑𝐎 ✨"
+    VERSION = "7.0.0"
+    SUPPORT_ID = "@aurponmodz"
+    
+    Path(PROJECT_DIR).mkdir(exist_ok=True)
+
+# ==================== DATABASE ====================
+class Database:
+    def __init__(self):
+        self.conn = sqlite3.connect(Config.DB_NAME, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self.create_tables()
+    
+    def create_tables(self):
+        # Users table
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            join_date TEXT,
+            plan TEXT DEFAULT 'free',
+            credits INTEGER DEFAULT 100,
+            is_admin INTEGER DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            ban_reason TEXT,
+            total_bots INTEGER DEFAULT 0,
+            total_deploys INTEGER DEFAULT 0,
+            last_active TEXT
+        )''')
+        
+        # Bots table
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS bots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            bot_name TEXT,
+            filename TEXT,
+            file_size INTEGER,
+            pid INTEGER,
+            status TEXT,
+            start_time TEXT,
+            last_active TEXT,
+            cpu_usage REAL,
+            ram_usage REAL,
+            deploy_count INTEGER DEFAULT 0,
+            error_log TEXT,
+            version TEXT DEFAULT '1.0'
+        )''')
+        
+        # Activity logs
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT,
+            details TEXT,
+            created_at TEXT
+        )''')
+        
+        # Add admin user
+        self.cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (Config.ADMIN_ID, 'admin', 'Administrator',
+                           datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                           'enterprise', 999999, 1, 0, None, 0, 0,
+                           datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        
+        self.conn.commit()
+    
+    def get_user(self, user_id):
+        self.cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+        return self.cursor.fetchone()
+    
+    def get_all_users(self):
+        self.cursor.execute("SELECT id, username, plan, credits, is_banned, total_bots FROM users ORDER BY id DESC")
+        return self.cursor.fetchall()
+    
+    def get_user_bots(self, user_id):
+        self.cursor.execute("SELECT * FROM bots WHERE user_id=? ORDER BY id DESC", (user_id,))
+        return self.cursor.fetchall()
+    
+    def get_all_bots(self):
+        self.cursor.execute("SELECT b.*, u.username FROM bots b LEFT JOIN users u ON b.user_id = u.id ORDER BY b.id DESC")
+        return self.cursor.fetchall()
+    
+    def add_bot(self, user_id, bot_name, filename, file_size):
+        self.cursor.execute("INSERT INTO bots (user_id, bot_name, filename, file_size, status) VALUES (?, ?, ?, ?, ?)",
+                          (user_id, bot_name, filename, file_size, "Uploaded"))
+        self.conn.commit()
+        self.cursor.execute("UPDATE users SET total_bots=total_bots+1 WHERE id=?", (user_id,))
+        self.conn.commit()
+        return self.cursor.lastrowid
+    
+    def update_bot_status(self, bot_id, status, pid=None):
+        if pid:
+            self.cursor.execute("UPDATE bots SET status=?, pid=?, start_time=?, last_active=? WHERE id=?",
+                              (status, pid, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                               datetime.now().strftime('%Y-%m-%d %H:%M:%S'), bot_id))
+        else:
+            self.cursor.execute("UPDATE bots SET status=?, last_active=? WHERE id=?",
+                              (status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), bot_id))
+        self.conn.commit()
+        
+        # Update deploy count
+        if status == "Running":
+            self.cursor.execute("UPDATE bots SET deploy_count=deploy_count+1 WHERE id=?", (bot_id,))
+            self.cursor.execute("UPDATE users SET total_deploys=total_deploys+1 WHERE id=(SELECT user_id FROM bots WHERE id=?)", (bot_id,))
+            self.conn.commit()
+    
+    def delete_bot(self, bot_id):
+        self.cursor.execute("SELECT user_id FROM bots WHERE id=?", (bot_id,))
+        result = self.cursor.fetchone()
+        if result:
+            self.cursor.execute("UPDATE users SET total_bots=total_bots-1 WHERE id=?", (result[0],))
+        self.cursor.execute("DELETE FROM bots WHERE id=?", (bot_id,))
+        self.conn.commit()
+    
+    def add_credits(self, user_id, amount):
+        self.cursor.execute("UPDATE users SET credits=credits+? WHERE id=?", (amount, user_id))
+        self.conn.commit()
+    
+    def remove_credits(self, user_id, amount):
+        self.cursor.execute("UPDATE users SET credits=credits-? WHERE id=?", (amount, user_id))
+        self.conn.commit()
+    
+    def ban_user(self, user_id, reason):
+        self.cursor.execute("UPDATE users SET is_banned=1, ban_reason=? WHERE id=?", (reason, user_id))
+        self.conn.commit()
+    
+    def unban_user(self, user_id):
+        self.cursor.execute("UPDATE users SET is_banned=0, ban_reason=NULL WHERE id=?", (user_id,))
+        self.conn.commit()
+    
+    def update_user_plan(self, user_id, plan):
+        plan_limits = {'free': 5, 'basic': 20, 'pro': 50, 'enterprise': 999}
+        self.cursor.execute("UPDATE users SET plan=?, total_bots_limit=? WHERE id=?", 
+                          (plan, plan_limits.get(plan, 5), user_id))
+        self.conn.commit()
+    
+    def log_activity(self, user_id, action, details):
+        self.cursor.execute("INSERT INTO activity_logs (user_id, action, details, created_at) VALUES (?, ?, ?, ?)",
+                          (user_id, action, details, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        self.conn.commit()
+    
+    def get_stats(self):
+        total_users = self.cursor.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        active_users = self.cursor.execute("SELECT COUNT(*) FROM users WHERE last_active > datetime('now', '-7 day')").fetchone()[0]
+        total_bots = self.cursor.execute("SELECT COUNT(*) FROM bots").fetchone()[0]
+        running_bots = self.cursor.execute("SELECT COUNT(*) FROM bots WHERE status='Running'").fetchone()[0]
+        total_deploys = self.cursor.execute("SELECT SUM(deploy_count) FROM bots").fetchone()[0] or 0
+        
+        return {
+            'total_users': total_users,
+            'active_users': active_users,
+            'total_bots': total_bots,
+            'running_bots': running_bots,
+            'total_deploys': total_deploys
+        }
+
+db = Database()
+
+# ==================== BOT INIT ====================
+bot = telebot.TeleBot(Config.TOKEN, parse_mode="HTML")
+app = Flask(__name__)
+
+# ==================== HELPER FUNCTIONS ====================
+def is_admin(user_id):
+    user = db.get_user(user_id)
+    return user and user[6] == 1
+
+def is_banned(user_id):
+    user = db.get_user(user_id)
+    return user and user[7] == 1
+
+def get_system_stats():
+    try:
+        cpu = psutil.cpu_percent(interval=1)
+        ram = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        uptime = time.time() - psutil.boot_time()
+        return {
+            'cpu': cpu,
+            'ram': ram.percent,
+            'ram_used': ram.used,
+            'ram_total': ram.total,
+            'disk': disk.percent,
+            'disk_used': disk.used,
+            'disk_total': disk.total,
+            'uptime': uptime
+        }
+    except:
+        return {'cpu': 25, 'ram': 40, 'ram_used': 2e9, 'ram_total': 8e9, 'disk': 50, 'disk_used': 50e9, 'disk_total': 100e9, 'uptime': 86400}
+
+def format_bytes(bytes):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes < 1024.0:
+            return f"{bytes:.1f} {unit}"
+        bytes /= 1024.0
+    return f"{bytes:.1f} TB"
+
+def format_uptime(seconds):
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    minutes = int((seconds % 3600) // 60)
+    
+    if days > 0:
+        return f"{days}d {hours}h"
+    elif hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+def progress_bar(percent, length=15):
+    filled = int(length * percent / 100)
+    return "█" * filled + "░" * (length - filled)
+
+# ==================== KEYBOARDS ====================
+def main_menu(user_id):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        "📤 Upload Bot", "🤖 My Bots",
+        "⚡ Deploy Bot", "📊 Dashboard",
+        "💰 Buy Credits", "❓ Help",
+        "ℹ️ About"
+    ]
+    if is_admin(user_id):
+        buttons.insert(0, "👑 Admin Panel")
+    markup.add(*buttons)
+    return markup
+
+def admin_main_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("👥 Users Management", callback_data="admin_users"),
+        types.InlineKeyboardButton("🤖 Bots Management", callback_data="admin_bots"),
+        types.InlineKeyboardButton("📊 System Statistics", callback_data="admin_stats"),
+        types.InlineKeyboardButton("📢 Broadcast Message", callback_data="admin_broadcast"),
+        types.InlineKeyboardButton("💾 Backup Database", callback_data="admin_backup"),
+        types.InlineKeyboardButton("📜 Activity Logs", callback_data="admin_logs"),
+        types.InlineKeyboardButton("💰 Credits Management", callback_data="admin_credits"),
+        types.InlineKeyboardButton("⚙️ System Settings", callback_data="admin_settings"),
+        types.InlineKeyboardButton("🎁 Referral System", callback_data="admin_referral"),
+        types.InlineKeyboardButton("🔙 Back to Main", callback_data="admin_back_main")
+    )
+    return markup
+
+def users_list_menu(users, page=0, per_page=10):
+    total_pages = (len(users) + per_page - 1) // per_page
+    start = page * per_page
+    end = start + per_page
+    page_users = users[start:end]
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for user in page_users:
+        status = "🟢" if not user[4] else "🔴"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {user[1]} | {user[2]} | {user[3]} credits",
+            callback_data=f"user_detail_{user[0]}"
+        ))
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("◀️ Prev", callback_data=f"users_page_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("Next ▶️", callback_data=f"users_page_{page+1}"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back"))
+    return markup
+
+def user_detail_menu(user_id, username, credits, plan, is_banned, total_bots, total_deploys):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💰 Add Credits", callback_data=f"add_credits_{user_id}"),
+        types.InlineKeyboardButton("💎 Remove Credits", callback_data=f"remove_credits_{user_id}"),
+        types.InlineKeyboardButton("📊 User Bots", callback_data=f"user_bots_{user_id}"),
+        types.InlineKeyboardButton("🎯 User Stats", callback_data=f"user_stats_{user_id}")
+    )
+    
+    if is_banned:
+        markup.add(types.InlineKeyboardButton("🔓 Unban User", callback_data=f"unban_{user_id}"))
+    else:
+        markup.add(types.InlineKeyboardButton("🔨 Ban User", callback_data=f"ban_{user_id}"))
+    
+    markup.add(types.InlineKeyboardButton("🔙 Back to Users", callback_data="back_to_users"))
+    return markup
+
+def bots_list_menu(bots, page=0, per_page=10):
+    total_pages = (len(bots) + per_page - 1) // per_page
+    start = page * per_page
+    end = start + per_page
+    page_bots = bots[start:end]
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for bot in page_bots:
+        status = "🟢" if bot[5] == "Running" else "🔴"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {bot[2]} | Owner: {bot[12]} | Status: {bot[5]}",
+            callback_data=f"bot_detail_{bot[0]}"
+        ))
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(types.InlineKeyboardButton("◀️ Prev", callback_data=f"bots_page_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(types.InlineKeyboardButton("Next ▶️", callback_data=f"bots_page_{page+1}"))
+    
+    if nav_buttons:
+        markup.add(*nav_buttons)
+    
+    markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back"))
+    return markup
+
+def bot_detail_menu(bot_id, bot_name, user_id, username, status, deploy_count):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    if status == "Running":
+        markup.add(
+            types.InlineKeyboardButton("⏸ Stop Bot", callback_data=f"stop_bot_{bot_id}"),
+            types.InlineKeyboardButton("🔄 Restart Bot", callback_data=f"restart_bot_{bot_id}")
+        )
+    else:
+        markup.add(
+            types.InlineKeyboardButton("▶️ Start Bot", callback_data=f"start_bot_{bot_id}"),
+            types.InlineKeyboardButton("📊 Bot Stats", callback_data=f"bot_stats_{bot_id}")
+        )
+    
+    markup.add(
+        types.InlineKeyboardButton("📦 Export Bot", callback_data=f"export_bot_{bot_id}"),
+        types.InlineKeyboardButton("🗑 Delete Bot", callback_data=f"delete_bot_{bot_id}"),
+        types.InlineKeyboardButton("📝 View Logs", callback_data=f"bot_logs_{bot_id}"),
+        types.InlineKeyboardButton("🔙 Back to Bots", callback_data="back_to_bots")
+    )
+    return markup
+
+def user_bots_menu(bots, user_id, username):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for bot in bots:
+        status = "🟢" if bot[5] == "Running" else "🔴"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {bot[2]} - {bot[5]}",
+            callback_data=f"user_bot_detail_{bot[0]}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 Back to User", callback_data=f"back_to_user_{user_id}"))
+    return markup
+
+def bot_control_menu(bot_id, bot_name, status):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    if status == "Running":
+        markup.add(
+            types.InlineKeyboardButton("⏸ Stop", callback_data=f"user_stop_{bot_id}"),
+            types.InlineKeyboardButton("🔄 Restart", callback_data=f"user_restart_{bot_id}")
+        )
+    else:
+        markup.add(
+            types.InlineKeyboardButton("▶️ Start", callback_data=f"user_start_{bot_id}"),
+            types.InlineKeyboardButton("📊 Stats", callback_data=f"user_stats_{bot_id}")
+        )
+    
+    markup.add(
+        types.InlineKeyboardButton("📦 Export", callback_data=f"user_export_{bot_id}"),
+        types.InlineKeyboardButton("🗑 Delete", callback_data=f"user_delete_{bot_id}"),
+        types.InlineKeyboardButton("🔙 Back to My Bots", callback_data="back_to_mybots")
+    )
+    return markup
+
+# ==================== START COMMAND ====================
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "User"
+    full_name = message.from_user.first_name or "User"
+    
+    user = db.get_user(user_id)
+    if not user:
+        db.cursor.execute("INSERT INTO users (id, username, full_name, join_date, last_active) VALUES (?, ?, ?, ?, ?)",
+                         (user_id, username, full_name, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                          datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        db.conn.commit()
+        user = db.get_user(user_id)
+    
+    if is_banned(user_id):
+        bot.send_message(message.chat.id, f"❌ You are banned!\nReason: {user[8]}\nContact: {Config.SUPPORT_ID}")
+        return
+    
+    db.cursor.execute("UPDATE users SET last_active=? WHERE id=?", (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), user_id))
+    db.conn.commit()
+    
+    stats = get_system_stats()
+    db_stats = db.get_stats()
+    
+    if is_admin(user_id):
+        text = f"""
+╔════════════════════════════════════════╗
+║      👑 SUPER ADMIN PANEL 👑          ║
+╠════════════════════════════════════════╣
+║ 👤 <b>ADMIN:</b> @{username}                        
+║ 🆔 <b>ID:</b> <code>{user_id}</code>                           
+║ 💎 <b>Plan:</b> ENTERPRISE                         
+║ 💰 <b>Credits:</b> {user[5]}                            
+╠════════════════════════════════════════╣
+║ 📊 <b>PLATFORM STATS</b>                        
+║ ├ Users: {db_stats['total_users']}                            
+║ ├ Active (7d): {db_stats['active_users']}                        
+║ ├ Bots: {db_stats['total_bots']}/{db_stats['running_bots']} running       
+║ └ Deploys: {db_stats['total_deploys']}                            
+╠════════════════════════════════════════╣
+║ 🖥️ <b>SERVER STATUS</b>                          
+║ ├ CPU: {progress_bar(stats['cpu'])} {stats['cpu']:.0f}%             
+║ ├ RAM: {progress_bar(stats['ram'])} {stats['ram']:.0f}%             
+║ ├ Disk: {progress_bar(stats['disk'])} {stats['disk']:.0f}%             
+║ └ Uptime: {format_uptime(stats['uptime'])}                   
+╚════════════════════════════════════════╝
+
+🔧 <b>Use the buttons below to manage everything!</b>
+"""
+        bot.send_message(message.chat.id, text, reply_markup=admin_main_menu())
+        db.log_activity(user_id, "admin_panel", "Opened admin panel")
+    else:
+        text = f"""
+╔════════════════════════════════════════╗
+║     {Config.BRAND_NAME}     ║
+╠════════════════════════════════════════╣
+║ 👤 <b>USER:</b> @{username}                         
+║ 💎 <b>Plan:</b> {user[4].upper()}                            
+║ 💰 <b>Credits:</b> {user[5]}                            
+║ 🤖 <b>Bots:</b> {user[9]}/5                            
+╠════════════════════════════════════════╣
+║ 🖥️ <b>SYSTEM</b>                                 
+║ ├ CPU: {stats['cpu']:.0f}% ({progress_bar(stats['cpu'])})        
+║ ├ RAM: {stats['ram']:.0f}% ({progress_bar(stats['ram'])})        
+║ └ Uptime: {format_uptime(stats['uptime'])}                   
+╠════════════════════════════════════════╣
+║ 💡 <b>Quick Actions:</b>                      
+║ • Upload your bot to get started!       
+║ • Use the buttons below to manage       
+╚════════════════════════════════════════╝
+"""
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(user_id))
+        db.log_activity(user_id, "start", "Started bot")
+
+# ==================== USER MENU HANDLERS ====================
+@bot.message_handler(func=lambda m: m.text == "👑 Admin Panel")
+def admin_panel_handler(message):
+    if is_admin(message.from_user.id):
+        start_command(message)
+    else:
+        bot.reply_to(message, "❌ Admin access only!")
+
+@bot.message_handler(func=lambda m: m.text == "📤 Upload Bot")
+def upload_bot(message):
+    user_id = message.from_user.id
+    
+    if is_banned(user_id):
+        bot.reply_to(message, "❌ You are banned!")
+        return
+    
+    user = db.get_user(user_id)
+    if user[9] >= 5 and user[4] == 'free':
+        bot.reply_to(message, "❌ Bot limit reached! Upgrade to premium for more bots.")
+        return
+    
+    msg = bot.reply_to(message, "📤 Send your Python bot file (.py)\nMax size: 50MB")
+    bot.register_next_step_handler(msg, process_upload)
+
+def process_upload(message):
+    if not message.document:
+        bot.reply_to(message, "❌ Please send a file!")
+        return
+    
+    if not message.document.file_name.endswith('.py'):
+        bot.reply_to(message, "❌ Only .py files are allowed!")
+        return
+    
+    if message.document.file_size > 50 * 1024 * 1024:
+        bot.reply_to(message, "❌ File too large! Max 50MB")
+        return
+    
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        
+        filename = f"{uuid.uuid4().hex[:8]}_{message.document.file_name}"
+        file_path = Path(Config.PROJECT_DIR) / filename
+        file_path.write_bytes(downloaded)
+        
+        msg = bot.reply_to(message, "✅ Uploaded!\n\nEnter bot name:")
+        bot.register_next_step_handler(msg, save_bot, filename, message.document.file_size)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+def save_bot(message, filename, file_size):
+    user_id = message.from_user.id
+    bot_name = message.text.strip()[:50]
+    
+    bot_id = db.add_bot(user_id, bot_name, filename, file_size)
+    bot.send_message(message.chat.id, 
+                    f"✅ Bot '{bot_name}' saved successfully!\n\n"
+                    f"📁 File: {filename}\n"
+                    f"📦 Size: {file_size / 1024:.1f} KB\n\n"
+                    f"Use '⚡ Deploy Bot' to start it.",
+                    reply_markup=main_menu(user_id))
+    db.log_activity(user_id, "upload_bot", f"Uploaded bot: {bot_name}")
+
+@bot.message_handler(func=lambda m: m.text == "🤖 My Bots")
+def my_bots(message):
+    user_id = message.from_user.id
+    bots = db.get_user_bots(user_id)
+    
+    if not bots:
+        bot.reply_to(message, "🤖 No bots found!\nUse 'Upload Bot' to create one.")
+        return
+    
+    text = f"🤖 <b>YOUR BOTS</b> ({len(bots)})\n╔════════════════════════════════════════╗\n"
+    
+    for i, b in enumerate(bots, 1):
+        status_icon = "🟢" if b[6] == "Running" else "🔴"
+        text += f"║ {i}. {status_icon} <b>{b[2]}</b>\n"
+        text += f"║    Status: {b[6]} | Deploys: {b[11]}\n"
+        text += "╠────────────────────────────────────╣\n"
+    
+    text += "╚════════════════════════════════════════╝\n\nSelect a bot to manage:"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for b in bots:
+        markup.add(types.InlineKeyboardButton(
+            f"{'🟢' if b[6] == 'Running' else '🔴'} {b[2]}",
+            callback_data=f"my_bot_{b[0]}"
+        ))
+    
+    bot.send_message(message.chat.id, text, reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "⚡ Deploy Bot")
+def deploy_bot(message):
+    user_id = message.from_user.id
+    bots = db.get_user_bots(user_id)
+    available = [b for b in bots if b[6] != "Running"]
+    
+    if not available:
+        bot.reply_to(message, "📭 No bots available for deployment!\nUpload a bot first.")
+        return
+    
+    text = "⚡ <b>DEPLOY BOT</b>\n╔════════════════════════════════════════╗\n"
+    for i, b in enumerate(available, 1):
+        text += f"║ {i}. <b>{b[2]}</b>\n"
+        text += "╠────────────────────────────────────╣\n"
+    
+    text += "╚════════════════════════════════════════╝\n\nEnter number to deploy:"
+    
+    msg = bot.reply_to(message, text)
+    bot.register_next_step_handler(msg, process_deploy, available)
+
+def process_deploy(message, bots):
+    try:
+        choice = int(message.text.strip()) - 1
+        if choice < 0 or choice >= len(bots):
+            raise ValueError
+        
+        bot_data = bots[choice]
+        bot_id = bot_data[0]
+        bot_name = bot_data[2]
+        filename = bot_data[3]
+        file_path = Path(Config.PROJECT_DIR) / filename
+        
+        if not file_path.exists():
+            bot.reply_to(message, "❌ File not found!")
+            return
+        
+        proc = subprocess.Popen(['python', str(file_path)], 
+                               start_new_session=True,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+        
+        db.update_bot_status(bot_id, "Running", proc.pid)
+        
+        bot.reply_to(message, f"✅ <b>{bot_name}</b> is RUNNING!\nPID: <code>{proc.pid}</code>")
+        db.log_activity(message.from_user.id, "deploy_bot", f"Deployed bot: {bot_name}")
+        
+    except:
+        bot.reply_to(message, "❌ Invalid selection!")
+
+@bot.message_handler(func=lambda m: m.text == "📊 Dashboard")
+def dashboard(message):
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    bots = db.get_user_bots(user_id)
+    stats = get_system_stats()
+    
+    running = len([b for b in bots if b[6] == "Running"])
+    total_deploys = sum([b[11] for b in bots])
+    
+    text = f"""
+╔════════════════════════════════════════╗
+║           📊 DASHBOARD                ║
+╠════════════════════════════════════════╣
+║ 👤 <b>ACCOUNT</b>                            
+║ ├ Username: @{user[1]}                        
+║ ├ Plan: {user[4].upper()}                            
+║ ├ Credits: {user[5]}                            
+║ └ Joined: {user[3][:10]}                          
+╠════════════════════════════════════════╣
+║ 🤖 <b>BOTS</b>                                
+║ ├ Total: {len(bots)}                            
+║ ├ Running: {running}                            
+║ ├ Stopped: {len(bots) - running}                        
+║ └ Total Deploys: {total_deploys}                        
+╠════════════════════════════════════════╣
+║ 🖥️ <b>SYSTEM</b>                               
+║ ├ CPU: {stats['cpu']:.1f}%                            
+║ ├ RAM: {stats['ram']:.1f}%                            
+║ └ Uptime: {format_uptime(stats['uptime'])}                   
+╚════════════════════════════════════════╝
+"""
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "💰 Buy Credits")
+def buy_credits(message):
+    text = """
+╔════════════════════════════════════════╗
+║           💰 BUY CREDITS              ║
+╠════════════════════════════════════════╣
+║ <b>💎 CREDIT PACKAGES</b>                   
+║                                         
+║ 100 Credits  →  $4.99                  
+║ 500 Credits  →  $19.99                 
+║ 1000 Credits →  $34.99                 
+║ 5000 Credits →  $149.99                
+╠════════════════════════════════════════╣
+║ <b>💰 PREMIUM PLANS</b>                    
+║                                         
+║ BASIC (20 bots)    →  $9.99/month      
+║ PRO (50 bots)      →  $19.99/month     
+║ ENTERPRISE (999 bots) →  $49.99/month  
+╠════════════════════════════════════════╣
+║ 💳 <b>PAYMENT METHODS</b>                  
+║ • USDT (TRC20/BEP20)                   
+║ • Bitcoin / Ethereum                   
+║ • bKash / Nagad / Rocket (BD)          
+║ • Bank Transfer                        
+╠════════════════════════════════════════╣
+║ 💬 Contact @aurponmodz to purchase!    
+╚════════════════════════════════════════╝
+"""
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "❓ Help")
+def help_command(message):
+    text = """
+╔════════════════════════════════════════╗
+║              ❓ HELP                   ║
+╠════════════════════════════════════════╣
+║ <b>📤 UPLOAD BOT</b>                        
+║ Upload your Python bot file (.py)     
+║                                         
+║ <b>🤖 MY BOTS</b>                           
+║ View and manage your bots             
+║                                         
+║ <b>⚡ DEPLOY BOT</b>                        
+║ Start your uploaded bot               
+║                                         
+║ <b>📊 DASHBOARD</b>                        
+║ View your statistics                  
+║                                         
+║ <b>💰 BUY CREDITS</b>                      
+║ Purchase credits or upgrade plan      
+╠════════════════════════════════════════╣
+║ 💬 <b>SUPPORT</b>                            
+║ Contact: {Config.SUPPORT_ID}                 
+╚════════════════════════════════════════╝
+"""
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "ℹ️ About")
+def about_command(message):
+    stats = db.get_stats()
+    
+    text = f"""
+╔════════════════════════════════════════╗
+║            ℹ️ ABOUT                   ║
+╠════════════════════════════════════════╣
+║ {Config.BRAND_NAME}                       
+║ Version: {Config.VERSION}                     
+╠════════════════════════════════════════╣
+║ <b>✨ FEATURES</b>                           
+║ ✓ Easy bot deployment                 
+║ ✓ Real-time monitoring                
+║ ✓ Credit system                       
+║ ✓ Premium plans                       
+║ ✓ 24/7 hosting                        
+╠════════════════════════════════════════╣
+║ <b>📊 PLATFORM STATS</b>                    
+║ ├ Users: {stats['total_users']}                            
+║ ├ Bots: {stats['total_bots']}                            
+║ └ Running: {stats['running_bots']}                            
+╠════════════════════════════════════════╣
+║ 👨‍💻 <b>DEVELOPER</b>                         
+║ @aurponmodz                           
+║                                         
+║ 💬 <b>SUPPORT</b>                            
+║ {Config.SUPPORT_ID}                         
+╚════════════════════════════════════════╝
+"""
+    bot.send_message(message.chat.id, text)
+
+# ==================== ADMIN CALLBACK HANDLERS ====================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    data = call.data
+    
+    # ========== ADMIN MAIN MENU ==========
+    if data == "admin_back_main":
+        start_command(call.message)
+    
+    elif data == "admin_back":
+        bot.edit_message_text("🔧 Admin Panel", call.message.chat.id, call.message.message_id,
+                            reply_markup=admin_main_menu())
+    
+    # ========== USERS MANAGEMENT ==========
+    elif data == "admin_users":
+        users = db.get_all_users()
+        text = f"👥 <b>USERS MANAGEMENT</b>\n╔════════════════════════════════════════╗\n"
+        text += f"║ Total Users: {len(users)}\n╚════════════════════════════════════════╝\n\nSelect a user to manage:"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=users_list_menu(users))
+    
+    elif data.startswith("users_page_"):
+        page = int(data.split('_')[2])
+        users = db.get_all_users()
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                     reply_markup=users_list_menu(users, page))
+    
+    elif data == "back_to_users":
+        users = db.get_all_users()
+        text = f"👥 <b>USERS MANAGEMENT</b>\n╔════════════════════════════════════════╗\n"
+        text += f"║ Total Users: {len(users)}\n╚════════════════════════════════════════╝\n\nSelect a user to manage:"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=users_list_menu(users))
+    
+    elif data.startswith("user_detail_"):
+        user_id = int(data.split('_')[2])
+        user = db.get_user(user_id)
+        
+        if user:
+            text = f"""
+👤 <b>USER DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>ID:</b> <code>{user[0]}</code>                           
+║ <b>Username:</b> @{user[1]}                        
+║ <b>Name:</b> {user[2]}                        
+║ <b>Plan:</b> {user[4].upper()}                            
+║ <b>Credits:</b> {user[5]}                            
+║ <b>Status:</b> {'🔴 BANNED' if user[7] else '🟢 ACTIVE'}                
+║ <b>Total Bots:</b> {user[9]}                            
+║ <b>Total Deploys:</b> {user[10]}                         
+║ <b>Joined:</b> {user[3][:10]}                          
+║ <b>Last Active:</b> {user[11][:10] if user[11] else 'Never'}                   
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=user_detail_menu(user_id, user[1], user[5], user[4], user[7], user[9], user[10]))
+    
+    # ========== ADD/REMOVE CREDITS ==========
+    elif data.startswith("add_credits_"):
+        user_id = int(data.split('_')[2])
+        msg = bot.send_message(call.message.chat.id, f"💰 Enter amount of credits to add for user {user_id}:")
+        bot.register_next_step_handler(msg, process_add_credits, user_id, call.message)
+    
+    elif data.startswith("remove_credits_"):
+        user_id = int(data.split('_')[2])
+        msg = bot.send_message(call.message.chat.id, f"💎 Enter amount of credits to remove from user {user_id}:")
+        bot.register_next_step_handler(msg, process_remove_credits, user_id, call.message)
+    
+    # ========== BAN/UNBAN ==========
+    elif data.startswith("ban_"):
+        user_id = int(data.split('_')[1])
+        msg = bot.send_message(call.message.chat.id, f"🔨 Enter ban reason for user {user_id}:")
+        bot.register_next_step_handler(msg, process_ban_user, user_id, call.message)
+    
+    elif data.startswith("unban_"):
+        user_id = int(data.split('_')[1])
+        db.unban_user(user_id)
+        bot.answer_callback_query(call.id, "✅ User unbanned!")
+        
+        user = db.get_user(user_id)
+        text = f"""
+👤 <b>USER DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>ID:</b> <code>{user[0]}</code>                           
+║ <b>Username:</b> @{user[1]}                        
+║ <b>Status:</b> 🟢 ACTIVE                         
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=user_detail_menu(user_id, user[1], user[5], user[4], user[7], user[9], user[10]))
+    
+    # ========== USER BOTS ==========
+    elif data.startswith("user_bots_"):
+        user_id = int(data.split('_')[2])
+        user = db.get_user(user_id)
+        bots = db.get_user_bots(user_id)
+        
+        if not bots:
+            bot.answer_callback_query(call.id, "No bots found for this user!")
+            return
+        
+        text = f"🤖 <b>BOTS OF @{user[1]}</b> ({len(bots)})\n\n"
+        
+        markup = user_bots_menu(bots, user_id, user[1])
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    
+    elif data.startswith("user_bot_detail_"):
+        bot_id = int(data.split('_')[3])
+        db.cursor.execute("SELECT * FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data:
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {bot_data[2]}                            
+║ <b>File:</b> {bot_data[3]}                            
+║ <b>Size:</b> {bot_data[4] / 1024:.1f} KB                       
+║ <b>Status:</b> {'🟢 RUNNING' if bot_data[6] == 'Running' else '🔴 STOPPED'}          
+║ <b>Deploys:</b> {bot_data[11]}                           
+║ <b>Started:</b> {bot_data[7][:10] if bot_data[7] else 'Never'}                 
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_detail_menu(bot_id, bot_data[2], bot_data[1], 
+                                                            bot_data[1], bot_data[6], bot_data[11]))
+    
+    elif data.startswith("back_to_user_"):
+        user_id = int(data.split('_')[3])
+        user = db.get_user(user_id)
+        
+        text = f"""
+👤 <b>USER DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>ID:</b> <code>{user[0]}</code>                           
+║ <b>Username:</b> @{user[1]}                        
+║ <b>Plan:</b> {user[4].upper()}                            
+║ <b>Credits:</b> {user[5]}                            
+║ <b>Status:</b> {'🔴 BANNED' if user[7] else '🟢 ACTIVE'}                
+║ <b>Total Bots:</b> {user[9]}                            
+║ <b>Total Deploys:</b> {user[10]}                         
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=user_detail_menu(user_id, user[1], user[5], user[4], user[7], user[9], user[10]))
+    
+    # ========== USER STATS ==========
+    elif data.startswith("user_stats_"):
+        user_id = int(data.split('_')[2])
+        user = db.get_user(user_id)
+        bots = db.get_user_bots(user_id)
+        
+        running = len([b for b in bots if b[6] == "Running"])
+        
+        text = f"""
+📊 <b>USER STATISTICS</b>
+╔════════════════════════════════════════╗
+║ <b>@{user[1]}</b>                               
+╠════════════════════════════════════════╣
+║ <b>📈 BOT STATS</b>                           
+║ ├ Total Bots: {len(bots)}                            
+║ ├ Running: {running}                            
+║ └ Stopped: {len(bots) - running}                        
+╠════════════════════════════════════════╣
+║ <b>💰 ACCOUNT</b>                             
+║ ├ Credits: {user[5]}                            
+║ ├ Plan: {user[4].upper()}                            
+║ └ Total Deploys: {user[10]}                         
+╚════════════════════════════════════════╝
+"""
+        bot.send_message(call.message.chat.id, text)
+        bot.answer_callback_query(call.id)
+    
+    # ========== BOTS MANAGEMENT ==========
+    elif data == "admin_bots":
+        bots = db.get_all_bots()
+        text = f"🤖 <b>BOTS MANAGEMENT</b>\n╔════════════════════════════════════════╗\n"
+        text += f"║ Total Bots: {len(bots)}\n╚════════════════════════════════════════╝\n\nSelect a bot to manage:"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=bots_list_menu(bots))
+    
+    elif data.startswith("bots_page_"):
+        page = int(data.split('_')[2])
+        bots = db.get_all_bots()
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                     reply_markup=bots_list_menu(bots, page))
+    
+    elif data == "back_to_bots":
+        bots = db.get_all_bots()
+        text = f"🤖 <b>BOTS MANAGEMENT</b>\n╔════════════════════════════════════════╗\n"
+        text += f"║ Total Bots: {len(bots)}\n╚════════════════════════════════════════╝\n\nSelect a bot to manage:"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=bots_list_menu(bots))
+    
+    elif data.startswith("bot_detail_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT b.*, u.username FROM bots b LEFT JOIN users u ON b.user_id = u.id WHERE b.id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data:
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {bot_data[2]}                            
+║ <b>Owner:</b> @{bot_data[12]}                        
+║ <b>File:</b> {bot_data[3]}                            
+║ <b>Size:</b> {bot_data[4] / 1024:.1f} KB                       
+║ <b>Status:</b> {'🟢 RUNNING' if bot_data[6] == 'Running' else '🔴 STOPPED'}          
+║ <b>Deploys:</b> {bot_data[11]}                           
+║ <b>Started:</b> {bot_data[7][:10] if bot_data[7] else 'Never'}                 
+║ <b>Last Active:</b> {bot_data[8][:10] if bot_data[8] else 'Never'}                 
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_detail_menu(bot_id, bot_data[2], bot_data[1], 
+                                                            bot_data[12], bot_data[6], bot_data[11]))
+    
+    # ========== BOT ACTIONS (START/STOP/RESTART/DELETE/EXPORT) ==========
+    elif data.startswith("start_bot_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data:
+            file_path = Path(Config.PROJECT_DIR) / bot_data[1]
+            if file_path.exists():
+                proc = subprocess.Popen(['python', str(file_path)], start_new_session=True)
+                db.update_bot_status(bot_id, "Running", proc.pid)
+                bot.answer_callback_query(call.id, f"✅ {bot_data[0]} started!")
+                
+                # Refresh
+                db.cursor.execute("SELECT b.*, u.username FROM bots b LEFT JOIN users u ON b.user_id = u.id WHERE b.id=?", (bot_id,))
+                new_data = db.cursor.fetchone()
+                text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {new_data[2]}                            
+║ <b>Owner:</b> @{new_data[12]}                        
+║ <b>Status:</b> 🟢 RUNNING                         
+║ <b>Deploys:</b> {new_data[11]}                           
+╚════════════════════════════════════════╝
+"""
+                bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                    reply_markup=bot_detail_menu(bot_id, new_data[2], new_data[1], 
+                                                                new_data[12], "Running", new_data[11]))
+    
+    elif data.startswith("stop_bot_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[0]:
+            try:
+                os.kill(bot_data[0], signal.SIGTERM)
+            except:
+                pass
+            db.update_bot_status(bot_id, "Stopped")
+            bot.answer_callback_query(call.id, f"⏸ {bot_data[1]} stopped!")
+            
+            # Refresh
+            db.cursor.execute("SELECT b.*, u.username FROM bots b LEFT JOIN users u ON b.user_id = u.id WHERE b.id=?", (bot_id,))
+            new_data = db.cursor.fetchone()
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {new_data[2]}                            
+║ <b>Owner:</b> @{new_data[12]}                        
+║ <b>Status:</b> 🔴 STOPPED                         
+║ <b>Deploys:</b> {new_data[11]}                           
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_detail_menu(bot_id, new_data[2], new_data[1], 
+                                                            new_data[12], "Stopped", new_data[11]))
+    
+    elif data.startswith("restart_bot_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[0]:
+            try:
+                os.kill(bot_data[0], signal.SIGTERM)
+            except:
+                pass
+        
+        time.sleep(1)
+        
+        file_path = Path(Config.PROJECT_DIR) / bot_data[2]
+        if file_path.exists():
+            proc = subprocess.Popen(['python', str(file_path)], start_new_session=True)
+            db.update_bot_status(bot_id, "Running", proc.pid)
+            bot.answer_callback_query(call.id, f"🔄 {bot_data[1]} restarted!")
+            
+            # Refresh
+            db.cursor.execute("SELECT b.*, u.username FROM bots b LEFT JOIN users u ON b.user_id = u.id WHERE b.id=?", (bot_id,))
+            new_data = db.cursor.fetchone()
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {new_data[2]}                            
+║ <b>Owner:</b> @{new_data[12]}                        
+║ <b>Status:</b> 🟢 RUNNING                         
+║ <b>Deploys:</b> {new_data[11]}                           
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_detail_menu(bot_id, new_data[2], new_data[1], 
+                                                            new_data[12], "Running", new_data[11]))
+    
+    elif data.startswith("delete_bot_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[0]:
+            try:
+                os.kill(bot_data[0], signal.SIGKILL)
+            except:
+                pass
+        
+        file_path = Path(Config.PROJECT_DIR) / bot_data[2]
+        if file_path.exists():
+            file_path.unlink()
+        
+        db.delete_bot(bot_id)
+        bot.answer_callback_query(call.id, f"🗑 {bot_data[1]} deleted!")
+        
+        # Refresh bots list
+        bots = db.get_all_bots()
+        text = f"🤖 <b>BOTS MANAGEMENT</b>\n╔════════════════════════════════════════╗\n"
+        text += f"║ Total Bots: {len(bots)}\n╚════════════════════════════════════════╝\n\nSelect a bot to manage:"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=bots_list_menu(bots))
+    
+    elif data.startswith("export_bot_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data:
+            file_path = Path(Config.PROJECT_DIR) / bot_data[1]
+            if file_path.exists():
+                with open(file_path, 'rb') as f:
+                    bot.send_document(call.message.chat.id, f, caption=f"📦 Exported: {bot_data[0]}")
+                bot.answer_callback_query(call.id, "Bot exported!")
+    
+    elif data.startswith("bot_stats_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name, status FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[2] == "Running" and bot_data[0]:
+            try:
+                proc = psutil.Process(bot_data[0])
+                cpu = proc.cpu_percent(interval=0.5)
+                mem = proc.memory_percent()
+                text = f"""
+📊 <b>BOT STATISTICS</b>
+╔════════════════════════════════════════╗
+║ <b>{bot_data[1]}</b>                               
+╠════════════════════════════════════════╣
+║ 🖥️ <b>RESOURCE USAGE</b>                     
+║ ├ CPU: {progress_bar(cpu)} {cpu:.1f}%               
+║ ├ RAM: {progress_bar(mem)} {mem:.1f}%               
+║ ├ PID: <code>{bot_data[0]}</code>                         
+║ └ Status: 🟢 Running                      
+╠════════════════════════════════════════╣
+║ 📈 <b>PERFORMANCE</b>                         
+║ ├ Memory: {format_bytes(proc.memory_info().rss)}          
+║ └ Threads: {proc.num_threads()}                          
+╚════════════════════════════════════════╝
+"""
+                bot.send_message(call.message.chat.id, text)
+            except:
+                bot.answer_callback_query(call.id, "Cannot get stats!")
+        else:
+            bot.answer_callback_query(call.id, "Bot is not running!")
+    
+    # ========== ADMIN STATS ==========
+    elif data == "admin_stats":
+        stats = db.get_stats()
+        system = get_system_stats()
+        
+        text = f"""
+📊 <b>SYSTEM STATISTICS</b>
+╔════════════════════════════════════════╗
+║ 👥 <b>USERS</b>                                 
+║ ├ Total: {stats['total_users']}                            
+║ ├ Active (7d): {stats['active_users']}                        
+║ └ Inactive: {stats['total_users'] - stats['active_users']}                    
+╠════════════════════════════════════════╣
+║ 🤖 <b>BOTS</b>                                  
+║ ├ Total: {stats['total_bots']}                            
+║ ├ Running: {stats['running_bots']}                            
+║ ├ Stopped: {stats['total_bots'] - stats['running_bots']}                        
+║ └ Total Deploys: {stats['total_deploys']}                            
+╠════════════════════════════════════════╣
+║ 🖥️ <b>SERVER</b>                                 
+║ ├ CPU: {system['cpu']:.1f}% ({progress_bar(system['cpu'])})          
+║ ├ RAM: {system['ram']:.1f}% ({progress_bar(system['ram'])})
+║ ├ Used: {format_bytes(system['ram_used'])}/{format_bytes(system['ram_total'])}
+║ ├ Disk: {system['disk']:.1f}% ({progress_bar(system['disk'])})
+║ └ Uptime: {format_uptime(system['uptime'])}                   
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=types.InlineKeyboardMarkup().add(
+                                types.InlineKeyboardButton("🔙 Back", callback_data="admin_back")))
+    
+    # ========== ADMIN BROADCAST ==========
+    elif data == "admin_broadcast":
+        msg = bot.send_message(call.message.chat.id, "📢 Enter your broadcast message:")
+        bot.register_next_step_handler(msg, process_broadcast, call.message)
+    
+    # ========== ADMIN BACKUP ==========
+    elif data == "admin_backup":
+        backup_path = Path(Config.DB_NAME)
+        if backup_path.exists():
+            with open(backup_path, 'rb') as f:
+                bot.send_document(call.message.chat.id, f, 
+                                caption=f"💾 Database Backup\nSize: {backup_path.stat().st_size / 1024:.2f} KB\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            bot.answer_callback_query(call.id, "Backup sent!")
+        else:
+            bot.answer_callback_query(call.id, "Database file not found!")
+    
+    # ========== ADMIN LOGS ==========
+    elif data == "admin_logs":
+        db.cursor.execute("SELECT action, user_id, details, created_at FROM activity_logs ORDER BY id DESC LIMIT 20")
+        logs = db.cursor.fetchall()
+        
+        text = "📜 <b>ACTIVITY LOGS</b>\n╔════════════════════════════════════════╗\n"
+        for log in logs:
+            text += f"║ [{log[3][:16]}] {log[0]}\n"
+            text += f"║   User: {log[1]} | {log[2][:30]}\n"
+            text += "╠────────────────────────────────────╣\n"
+        
+        text += "╚════════════════════════════════════════╝"
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=types.InlineKeyboardMarkup().add(
+                                types.InlineKeyboardButton("🔙 Back", callback_data="admin_back")))
+    
+    # ========== ADMIN CREDITS ==========
+    elif data == "admin_credits":
+        text = """
+💰 <b>CREDITS MANAGEMENT</b>
+╔════════════════════════════════════════╗
+║ <b>Commands:</b>                          
+║                                         
+║ • /add_credits <user_id> <amount>      
+║ • /remove_credits <user_id> <amount>   
+║ • /check_credits <user_id>             
+║                                         
+║ <b>Example:</b>                            
+║ /add_credits 6487613131 100            
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=types.InlineKeyboardMarkup().add(
+                                types.InlineKeyboardButton("🔙 Back", callback_data="admin_back")))
+    
+    # ========== ADMIN SETTINGS ==========
+    elif data == "admin_settings":
+        text = """
+⚙️ <b>SYSTEM SETTINGS</b>
+╔════════════════════════════════════════╗
+║ <b>Current Settings:</b>                   
+║                                         
+║ • Maintenance Mode: OFF                
+║ • Auto Backup: ON (Daily)              
+║ • Max File Size: 50MB                  
+║ • Free Bot Limit: 5                    
+║ • Default Credits: 100                 
+╠════════════════════════════════════════╣
+║ <b>Contact admin to change settings</b>    
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=types.InlineKeyboardMarkup().add(
+                                types.InlineKeyboardButton("🔙 Back", callback_data="admin_back")))
+    
+    # ========== ADMIN REFERRAL ==========
+    elif data == "admin_referral":
+        text = """
+🎁 <b>REFERRAL SYSTEM</b>
+╔════════════════════════════════════════╗
+║ <b>Current Settings:</b>                   
+║                                         
+║ • Referral Bonus: 50 credits           
+║ • Referred Bonus: 25 credits           
+║ • Total Referrals: Calculated          
+╠════════════════════════════════════════╣
+║ <b>Top Referrers:</b>                      
+║ • Coming soon...                       
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                            reply_markup=types.InlineKeyboardMarkup().add(
+                                types.InlineKeyboardButton("🔙 Back", callback_data="admin_back")))
+    
+    # ========== USER MY BOTS ==========
+    elif data.startswith("my_bot_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT * FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data:
+            uptime = "N/A"
+            if bot_data[6] == "Running" and bot_data[7]:
+                try:
+                    start = datetime.strptime(bot_data[7], '%Y-%m-%d %H:%M:%S')
+                    uptime = str(datetime.now() - start).split('.')[0]
+                except:
+                    pass
+            
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {bot_data[2]}                            
+║ <b>File:</b> {bot_data[3]}                            
+║ <b>Size:</b> {bot_data[4] / 1024:.1f} KB                       
+║ <b>Status:</b> {'🟢 RUNNING' if bot_data[6] == 'Running' else '🔴 STOPPED'}          
+║ <b>Deploys:</b> {bot_data[11]}                           
+║ <b>Started:</b> {bot_data[7][:10] if bot_data[7] else 'Never'}                 
+║ <b>Uptime:</b> {uptime}                            
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_control_menu(bot_id, bot_data[2], bot_data[6]))
+    
+    elif data == "back_to_mybots":
+        user_id = call.from_user.id
+        bots = db.get_user_bots(user_id)
+        
+        text = f"🤖 <b>YOUR BOTS</b> ({len(bots)})\n╔════════════════════════════════════════╗\n"
+        
+        for i, b in enumerate(bots, 1):
+            status_icon = "🟢" if b[6] == "Running" else "🔴"
+            text += f"║ {i}. {status_icon} <b>{b[2]}</b>\n"
+            text += f"║    Status: {b[6]} | Deploys: {b[11]}\n"
+            text += "╠────────────────────────────────────╣\n"
+        
+        text += "╚════════════════════════════════════════╝\n\nSelect a bot to manage:"
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for b in bots:
+            markup.add(types.InlineKeyboardButton(
+                f"{'🟢' if b[6] == 'Running' else '🔴'} {b[2]}",
+                callback_data=f"my_bot_{b[0]}"
+            ))
+        
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    
+    # ========== USER BOT ACTIONS ==========
+    elif data.startswith("user_start_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT bot_name, filename, user_id FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[2] == call.from_user.id:
+            file_path = Path(Config.PROJECT_DIR) / bot_data[1]
+            if file_path.exists():
+                proc = subprocess.Popen(['python', str(file_path)], start_new_session=True)
+                db.update_bot_status(bot_id, "Running", proc.pid)
+                bot.answer_callback_query(call.id, f"✅ {bot_data[0]} started!")
+                
+                db.cursor.execute("SELECT * FROM bots WHERE id=?", (bot_id,))
+                new_data = db.cursor.fetchone()
+                text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {new_data[2]}                            
+║ <b>Status:</b> 🟢 RUNNING                         
+║ <b>Deploys:</b> {new_data[11]}                           
+╚════════════════════════════════════════╝
+"""
+                bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                    reply_markup=bot_control_menu(bot_id, new_data[2], "Running"))
+    
+    elif data.startswith("user_stop_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[0]:
+            try:
+                os.kill(bot_data[0], signal.SIGTERM)
+            except:
+                pass
+            db.update_bot_status(bot_id, "Stopped")
+            bot.answer_callback_query(call.id, f"⏸ {bot_data[1]} stopped!")
+            
+            db.cursor.execute("SELECT * FROM bots WHERE id=?", (bot_id,))
+            new_data = db.cursor.fetchone()
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {new_data[2]}                            
+║ <b>Status:</b> 🔴 STOPPED                         
+║ <b>Deploys:</b> {new_data[11]}                           
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_control_menu(bot_id, new_data[2], "Stopped"))
+    
+    elif data.startswith("user_restart_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[0]:
+            try:
+                os.kill(bot_data[0], signal.SIGTERM)
+            except:
+                pass
+        
+        time.sleep(1)
+        
+        file_path = Path(Config.PROJECT_DIR) / bot_data[2]
+        if file_path.exists():
+            proc = subprocess.Popen(['python', str(file_path)], start_new_session=True)
+            db.update_bot_status(bot_id, "Running", proc.pid)
+            bot.answer_callback_query(call.id, f"🔄 {bot_data[1]} restarted!")
+            
+            db.cursor.execute("SELECT * FROM bots WHERE id=?", (bot_id,))
+            new_data = db.cursor.fetchone()
+            text = f"""
+🤖 <b>BOT DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Name:</b> {new_data[2]}                            
+║ <b>Status:</b> 🟢 RUNNING                         
+║ <b>Deploys:</b> {new_data[11]}                           
+╚════════════════════════════════════════╝
+"""
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                                reply_markup=bot_control_menu(bot_id, new_data[2], "Running"))
+    
+    elif data.startswith("user_delete_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[0]:
+            try:
+                os.kill(bot_data[0], signal.SIGKILL)
+            except:
+                pass
+        
+        file_path = Path(Config.PROJECT_DIR) / bot_data[2]
+        if file_path.exists():
+            file_path.unlink()
+        
+        db.delete_bot(bot_id)
+        bot.answer_callback_query(call.id, f"🗑 {bot_data[1]} deleted!")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.send_message(call.message.chat.id, f"✅ Bot '{bot_data[1]}' deleted successfully!")
+    
+    elif data.startswith("user_export_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT bot_name, filename FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data:
+            file_path = Path(Config.PROJECT_DIR) / bot_data[1]
+            if file_path.exists():
+                with open(file_path, 'rb') as f:
+                    bot.send_document(call.message.chat.id, f, caption=f"📦 Exported: {bot_data[0]}")
+                bot.answer_callback_query(call.id, "Bot exported!")
+    
+    elif data.startswith("user_stats_"):
+        bot_id = int(data.split('_')[2])
+        db.cursor.execute("SELECT pid, bot_name, status FROM bots WHERE id=?", (bot_id,))
+        bot_data = db.cursor.fetchone()
+        
+        if bot_data and bot_data[2] == "Running" and bot_data[0]:
+            try:
+                proc = psutil.Process(bot_data[0])
+                cpu = proc.cpu_percent(interval=0.5)
+                mem = proc.memory_percent()
+                text = f"""
+📊 <b>BOT STATISTICS</b>
+╔════════════════════════════════════════╗
+║ <b>{bot_data[1]}</b>                               
+╠════════════════════════════════════════╣
+║ 🖥️ <b>RESOURCES</b>                          
+║ ├ CPU: {progress_bar(cpu)} {cpu:.1f}%               
+║ ├ RAM: {progress_bar(mem)} {mem:.1f}%               
+║ ├ PID: <code>{bot_data[0]}</code>                         
+║ └ Status: 🟢 Running                      
+╚════════════════════════════════════════╝
+"""
+                bot.send_message(call.message.chat.id, text)
+            except:
+                bot.answer_callback_query(call.id, "Cannot get stats!")
+        else:
+            bot.answer_callback_query(call.id, "Bot is not running!")
+    
+    bot.answer_callback_query(call.id)
+
+# ==================== PROCESS FUNCTIONS ====================
+def process_add_credits(message, user_id, original_message):
+    try:
+        amount = int(message.text.strip())
+        db.add_credits(user_id, amount)
+        bot.send_message(message.chat.id, f"✅ Added {amount} credits to user {user_id}!")
+        
+        user = db.get_user(user_id)
+        text = f"""
+👤 <b>USER DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Username:</b> @{user[1]}                        
+║ <b>Credits:</b> {user[5]} (Updated)                 
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, original_message.chat.id, original_message.message_id,
+                            reply_markup=user_detail_menu(user_id, user[1], user[5], user[4], user[7], user[9], user[10]))
+        db.log_activity(Config.ADMIN_ID, "add_credits", f"Added {amount} credits to user {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid amount! Please enter a number.")
+
+def process_remove_credits(message, user_id, original_message):
+    try:
+        amount = int(message.text.strip())
+        db.remove_credits(user_id, amount)
+        bot.send_message(message.chat.id, f"✅ Removed {amount} credits from user {user_id}!")
+        
+        user = db.get_user(user_id)
+        text = f"""
+👤 <b>USER DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Username:</b> @{user[1]}                        
+║ <b>Credits:</b> {user[5]} (Updated)                 
+╚════════════════════════════════════════╝
+"""
+        bot.edit_message_text(text, original_message.chat.id, original_message.message_id,
+                            reply_markup=user_detail_menu(user_id, user[1], user[5], user[4], user[7], user[9], user[10]))
+        db.log_activity(Config.ADMIN_ID, "remove_credits", f"Removed {amount} credits from user {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid amount! Please enter a number.")
+
+def process_ban_user(message, user_id, original_message):
+    reason = message.text.strip()
+    db.ban_user(user_id, reason)
+    bot.send_message(message.chat.id, f"✅ User {user_id} banned!\nReason: {reason}")
+    
+    user = db.get_user(user_id)
+    text = f"""
+👤 <b>USER DETAILS</b>
+╔════════════════════════════════════════╗
+║ <b>Username:</b> @{user[1]}                        
+║ <b>Status:</b> 🔴 BANNED                         
+║ <b>Reason:</b> {reason}                            
+╚════════════════════════════════════════╝
+"""
+    bot.edit_message_text(text, original_message.chat.id, original_message.message_id,
+                        reply_markup=user_detail_menu(user_id, user[1], user[5], user[4], True, user[9], user[10]))
+    db.log_activity(Config.ADMIN_ID, "ban_user", f"Banned user {user_id}: {reason}")
+
+def process_broadcast(message, original_message):
+    broadcast_text = message.text
+    users = db.get_all_users()
+    
+    success = 0
+    failed = 0
+    
+    for user in users:
+        try:
+            bot.send_message(user[0], f"📢 <b>ANNOUNCEMENT</b>\n\n{broadcast_text}", parse_mode="HTML")
+            success += 1
+            time.sleep(0.05)
+        except:
+            failed += 1
+    
+    bot.send_message(original_message.chat.id, f"✅ Broadcast completed!\n\n✅ Sent: {success}\n❌ Failed: {failed}")
+    db.log_activity(Config.ADMIN_ID, "broadcast", f"Sent broadcast to {success} users")
+    
+    # Go back to admin panel
+    start_command(original_message)
+
+# ==================== FLASK ROUTES ====================
+@app.route('/')
+def home():
+    stats = db.get_stats()
+    return jsonify({
+        "status": "online",
+        "brand": Config.BRAND_NAME,
+        "version": Config.VERSION,
+        "stats": stats,
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/api/stats')
+def api_stats():
+    return jsonify(db.get_stats())
+
+@app.route('/api/users')
+def api_users():
+    users = db.get_all_users()
+    return jsonify([{
+        "id": u[0],
+        "username": u[1],
+        "plan": u[2],
+        "credits": u[3],
+        "banned": bool(u[4]),
+        "bots": u[5]
+    } for u in users])
+
+# ==================== BACKGROUND TASKS ====================
+def cleanup_processes():
+    while True:
+        try:
+            db.cursor.execute("SELECT id, pid FROM bots WHERE status='Running'")
+            running = db.cursor.fetchall()
+            
+            for bot_id, pid in running:
+                if pid:
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        db.update_bot_status(bot_id, "Stopped")
+                        db.log_activity(0, "cleanup", f"Cleaned up bot {bot_id}")
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+        
+        time.sleep(60)
+
+# ==================== MAIN ====================
+def run_bot():
+    logger.info(f"Starting {Config.BRAND_NAME} v{Config.VERSION}")
+    
+    try:
+        bot.remove_webhook()
+        logger.info("Webhook removed")
+    except Exception as e:
+        logger.error(f"Webhook removal failed: {e}")
+    
+    time.sleep(2)
+    
+    while True:
+        try:
+            bot.infinity_polling(timeout=30, long_polling_timeout=30)
+        except Exception as e:
+            logger.error(f"Bot error: {e}")
+            time.sleep(10)
+
+if __name__ == '__main__':
+    # Start cleanup thread
+    threading.Thread(target=cleanup_processes, daemon=True).start()
+    
+    # Start bot thread
+    threading.Thread(target=run_bot, daemon=True).start()
+    
+    # Start Flask
+    logger.info(f"Starting Flask on port {Config.PORT}")
+    app.run(host='0.0.0.0', port=Config.PORT, debug=False)    BRAND_NAME = "✨ 𝐀𝐔𝐑𝐏𝐎𝐍 𝐃𝐄𝐗 𝐏𝐑𝐎 ✨"
     VERSION = "6.0.0"
     SUPPORT_ID = "@aurponmodz"
     
