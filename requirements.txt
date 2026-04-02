@@ -1,0 +1,9 @@
+pyTelegramBotAPI==4.8.0
+flask==2.3.3
+psutil==5.9.6
+flask-cors==4.0.0
+cryptography==41.0.7
+python-dotenv==1.0.0
+schedule==1.2.0
+Werkzeug==2.3.7
+requests==2.31.0
