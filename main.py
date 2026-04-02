@@ -12,11 +12,9 @@ import shutil
 import hashlib
 import logging
 from datetime import datetime, timedelta
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request
 from telebot import types
 from pathlib import Path
-from collections import defaultdict
-import requests
 import random
 import string
 
@@ -27,14 +25,785 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ADVANCED CONFIGURATION ====================
+# ==================== CONFIGURATION ====================
 class Config:
-    # Bot Configuration
     TOKEN = os.environ.get('BOT_TOKEN', '8754448627:AAFReyCErlSnESaSJOUzAt1Ut-n95w_xWDI')
     ADMIN_ID = int(os.environ.get('ADMIN_ID', 6487613131))
     PORT = int(os.environ.get('PORT', 10000))
+    PROJECT_DIR = 'projects'
+    DB_NAME = 'aurpon_bot.db'
     
-    # Paths
+    BRAND_NAME = "𝐀𝐔𝐑𝐏𝐎𝐍 𝐃𝐄𝐗"
+    VERSION = "5.0.0"
+    SUPPORT_ID = "@aurponmodz"
+    BOT_USERNAME = "@aurpon_bot_host_bot"
+    MAX_FILE_SIZE = 50 * 1024 * 1024
+    
+    # Create directories
+    for dir_path in [PROJECT_DIR]:
+        Path(dir_path).mkdir(exist_ok=True)
+
+# ==================== DATABASE ====================
+class DatabaseManager:
+    def __init__(self):
+        self.conn = sqlite3.connect(Config.DB_NAME, check_same_thread=False)
+        self.init_db()
+    
+    def init_db(self):
+        cursor = self.conn.cursor()
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT,
+            join_date TEXT,
+            expiry_date TEXT,
+            credits INTEGER DEFAULT 100,
+            bots_limit INTEGER DEFAULT 5,
+            is_vip INTEGER DEFAULT 0,
+            referral_code TEXT
+        )''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS bots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            bot_name TEXT,
+            filename TEXT,
+            pid INTEGER,
+            status TEXT,
+            start_time TEXT,
+            deploy_count INTEGER DEFAULT 0
+        )''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            description TEXT,
+            code TEXT,
+            downloads INTEGER DEFAULT 0
+        )''')
+        
+        # Add admin
+        cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                      (Config.ADMIN_ID, 'admin', datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                       (datetime.now() + timedelta(days=3650)).strftime('%Y-%m-%d %H:%M:%S'),
+                       999999, 999, 1, 'ADMIN'))
+        
+        # Add templates
+        templates = [
+            ("Echo Bot", "Simple echo bot", 
+             '''import telebot
+TOKEN = "YOUR_BOT_TOKEN"
+bot = telebot.TeleBot(TOKEN)
+@bot.message_handler(func=lambda m: True)
+def echo(message):
+    bot.reply_to(message, message.text)
+bot.infinity_polling()'''),
+            
+            ("Weather Bot", "Get weather info",
+             '''import telebot, requests
+TOKEN = "YOUR_BOT_TOKEN"
+bot = telebot.TeleBot(TOKEN)
+@bot.message_handler(commands=['weather'])
+def weather(message):
+    city = message.text.replace('/weather', '').strip()
+    if city:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&units=metric&appid=YOUR_API_KEY"
+        data = requests.get(url).json()
+        temp = data['main']['temp']
+        bot.reply_to(message, f"Weather: {temp}°C")
+bot.infinity_polling()'''),
+            
+            ("Calculator Bot", "Math calculator",
+             '''import telebot
+TOKEN = "YOUR_BOT_TOKEN"
+bot = telebot.TeleBot(TOKEN)
+@bot.message_handler(func=lambda m: True)
+def calc(message):
+    try:
+        result = eval(message.text)
+        bot.reply_to(message, f"Result: {result}")
+    except:
+        bot.reply_to(message, "Invalid!")
+bot.infinity_polling()''')
+        ]
+        
+        for t in templates:
+            cursor.execute("INSERT OR IGNORE INTO templates (name, description, code) VALUES (?, ?, ?)", t)
+        
+        self.conn.commit()
+    
+    def get_user(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+        return cursor.fetchone()
+    
+    def get_user_bots(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM bots WHERE user_id=? ORDER BY id DESC", (user_id,))
+        return cursor.fetchall()
+    
+    def add_credits(self, user_id, amount):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE users SET credits=credits+? WHERE id=?", (amount, user_id))
+        self.conn.commit()
+
+db = DatabaseManager()
+
+# ==================== BOT INITIALIZATION ====================
+bot = telebot.TeleBot(Config.TOKEN, parse_mode="HTML")
+app = Flask(__name__)
+
+# ==================== KEYBOARDS ====================
+def main_menu():
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    buttons = [
+        "📤 UPLOAD BOT", "🤖 MY BOTS",
+        "⚡ DEPLOY BOT", "🎨 TEMPLATES",
+        "💰 BUY CREDITS", "📊 DASHBOARD",
+        "❓ HELP", "ℹ️ ABOUT"
+    ]
+    markup.add(*[types.KeyboardButton(btn) for btn in buttons])
+    return markup
+
+def bot_controls(bot_id, status):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    if status == "Running":
+        markup.add(
+            types.InlineKeyboardButton("⏸ STOP", callback_data=f"stop_{bot_id}"),
+            types.InlineKeyboardButton("🔄 RESTART", callback_data=f"restart_{bot_id}")
+        )
+    else:
+        markup.add(
+            types.InlineKeyboardButton("▶️ START", callback_data=f"start_{bot_id}"),
+            types.InlineKeyboardButton("📊 STATS", callback_data=f"stats_{bot_id}")
+        )
+    
+    markup.add(
+        types.InlineKeyboardButton("📦 EXPORT", callback_data=f"export_{bot_id}"),
+        types.InlineKeyboardButton("🗑 DELETE", callback_data=f"delete_{bot_id}")
+    )
+    
+    return markup
+
+# ==================== HELPER FUNCTIONS ====================
+def get_system_stats():
+    try:
+        cpu = psutil.cpu_percent(interval=1)
+        ram = psutil.virtual_memory().percent
+        disk = psutil.disk_usage('/').percent
+        uptime = time.time() - psutil.boot_time()
+        return {'cpu': cpu, 'ram': ram, 'disk': disk, 'uptime': uptime}
+    except:
+        return {'cpu': 25, 'ram': 40, 'disk': 50, 'uptime': 86400}
+
+def format_uptime(seconds):
+    days = int(seconds // 86400)
+    hours = int((seconds % 86400) // 3600)
+    minutes = int((seconds % 3600) // 60)
+    
+    if days > 0:
+        return f"{days}d {hours}h"
+    elif hours > 0:
+        return f"{hours}h {minutes}m"
+    else:
+        return f"{minutes}m"
+
+def progress_bar(percent, length=20):
+    filled = int(length * percent / 100)
+    return "▓" * filled + "░" * (length - filled)
+
+# ==================== MESSAGE HANDLERS ====================
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "User"
+    
+    user = db.get_user(user_id)
+    if not user:
+        referral_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+        cursor = db.conn.cursor()
+        expiry = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                      (user_id, username, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                       expiry, 100, 5, 0, referral_code))
+        db.conn.commit()
+        user = db.get_user(user_id)
+    
+    stats = get_system_stats()
+    
+    text = f"""
+╔══════════════════════════════╗
+║  {Config.BRAND_NAME} v{Config.VERSION}  ║
+╠══════════════════════════════╣
+║ 👤 <b>USER:</b> @{username}          
+║ 💎 <b>STATUS:</b> {'VIP' if user[6] else 'FREE'}              
+║ 💰 <b>CREDITS:</b> {user[4]}                 
+║ 📦 <b>BOTS LIMIT:</b> {user[5]}                
+╠══════════════════════════════╣
+║ 🖥️ <b>SYSTEM</b>                   
+║ CPU: {progress_bar(stats['cpu'])} {stats['cpu']:.0f}%    
+║ RAM: {progress_bar(stats['ram'])} {stats['ram']:.0f}%    
+║ UPTIME: {format_uptime(stats['uptime'])}    
+╚══════════════════════════════╝
+
+🎁 <b>Referral Code:</b> <code>{user[7]}</code>
+Share and get 50 credits per referral!
+"""
+    
+    bot.send_message(message.chat.id, text, reply_markup=main_menu())
+
+@bot.message_handler(func=lambda m: m.text == "📤 UPLOAD BOT")
+def upload_bot(message):
+    user = db.get_user(message.from_user.id)
+    if user[5] <= 0:
+        bot.reply_to(message, "❌ You've reached your bot limit!")
+        return
+    
+    msg = bot.reply_to(message, "📤 Send your Python bot file (.py)\nMax size: 50MB")
+    bot.register_next_step_handler(msg, process_upload)
+
+def process_upload(message):
+    if not message.document:
+        bot.reply_to(message, "❌ Please send a file!")
+        return
+    
+    file_name = message.document.file_name
+    if not file_name.endswith('.py'):
+        bot.reply_to(message, "❌ Only .py files are allowed!")
+        return
+    
+    if message.document.file_size > Config.MAX_FILE_SIZE:
+        bot.reply_to(message, f"❌ File too large! Max 50MB")
+        return
+    
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        
+        safe_name = f"{uuid.uuid4().hex[:8]}_{file_name}"
+        file_path = Path(Config.PROJECT_DIR) / safe_name
+        file_path.write_bytes(downloaded)
+        
+        msg = bot.reply_to(message, "✅ Uploaded!\n\nEnter bot name:")
+        bot.register_next_step_handler(msg, save_bot, safe_name)
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+def save_bot(message, filename):
+    user_id = message.from_user.id
+    bot_name = message.text.strip()[:50]
+    
+    cursor = db.conn.cursor()
+    cursor.execute("INSERT INTO bots (user_id, bot_name, filename, status) VALUES (?, ?, ?, ?)",
+                  (user_id, bot_name, filename, "Uploaded"))
+    
+    # Update user bot limit
+    user = db.get_user(user_id)
+    cursor.execute("UPDATE users SET bots_limit=bots_limit-1 WHERE id=?", (user_id,))
+    db.conn.commit()
+    
+    bot.send_message(message.chat.id, 
+                    f"✅ Bot '{bot_name}' saved!\n\nUse '⚡ DEPLOY BOT' to start it.",
+                    reply_markup=main_menu())
+
+@bot.message_handler(func=lambda m: m.text == "🤖 MY BOTS")
+def my_bots(message):
+    user_id = message.from_user.id
+    bots = db.get_user_bots(user_id)
+    
+    if not bots:
+        bot.reply_to(message, "🤖 No bots found!\nUse 'UPLOAD BOT' to create one.")
+        return
+    
+    text = "╔══════════════════════════════╗\n║        🤖 MY BOTS          ║\n╠══════════════════════════════╣\n"
+    
+    for i, b in enumerate(bots[:10], 1):
+        status_icon = "🟢" if b[5] == "Running" else "🔴"
+        text += f"║ {i}. {status_icon} <b>{b[2]}</b>\n"
+        text += f"║    Status: {b[5]}\n"
+        if b[7]:
+            text += f"║    Deploys: {b[7]}\n"
+        text += "╠──────────────────────────────╣\n"
+    
+    text += "╚══════════════════════════════╝\n\nSelect a bot:"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for b in bots:
+        markup.add(types.InlineKeyboardButton(
+            f"{b[2]} - {b[5]}", callback_data=f"manage_{b[0]}"
+        ))
+    
+    bot.send_message(message.chat.id, text, reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "⚡ DEPLOY BOT")
+def deploy_bot(message):
+    user_id = message.from_user.id
+    bots = db.get_user_bots(user_id)
+    available = [b for b in bots if b[5] != "Running"]
+    
+    if not available:
+        bot.reply_to(message, "📭 No bots available for deployment!")
+        return
+    
+    text = "╔══════════════════════════════╗\n║       ⚡ DEPLOY BOT        ║\n╠══════════════════════════════╣\n"
+    for i, b in enumerate(available, 1):
+        text += f"║ {i}. <b>{b[2]}</b>\n"
+        text += f"║    File: {b[3]}\n"
+        text += "╠──────────────────────────────╣\n"
+    
+    text += "╚══════════════════════════════╝\n\nEnter number to deploy:"
+    
+    msg = bot.reply_to(message, text)
+    bot.register_next_step_handler(msg, process_deploy, available)
+
+def process_deploy(message, bots):
+    try:
+        choice = int(message.text.strip()) - 1
+        if choice < 0 or choice >= len(bots):
+            raise ValueError
+        
+        bot_data = bots[choice]
+        bot_id = bot_data[0]
+        bot_name = bot_data[2]
+        filename = bot_data[3]
+        file_path = Path(Config.PROJECT_DIR) / filename
+        
+        if not file_path.exists():
+            bot.reply_to(message, "❌ File not found!")
+            return
+        
+        # Start the bot
+        proc = subprocess.Popen(['python', str(file_path)], 
+                               start_new_session=True,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+        
+        cursor = db.conn.cursor()
+        cursor.execute("UPDATE bots SET pid=?, status='Running', start_time=?, deploy_count=deploy_count+1 WHERE id=?",
+                      (proc.pid, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), bot_id))
+        db.conn.commit()
+        
+        bot.reply_to(message, f"✅ <b>{bot_name}</b> is RUNNING!\nPID: <code>{proc.pid}</code>")
+        
+    except:
+        bot.reply_to(message, "❌ Invalid selection!")
+
+@bot.message_handler(func=lambda m: m.text == "🎨 TEMPLATES")
+def templates_menu(message):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT id, name, description FROM templates ORDER BY downloads DESC")
+    templates = cursor.fetchall()
+    
+    text = "╔══════════════════════════════╗\n║       🎨 TEMPLATES        ║\n╠══════════════════════════════╣\n"
+    
+    for t in templates[:5]:
+        text += f"║ 📦 <b>{t[1]}</b>\n"
+        text += f"║    {t[2][:30]}...\n"
+        text += "╠──────────────────────────────╣\n"
+    
+    text += "╚══════════════════════════════╝\n\nSelect a template:"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for t in templates:
+        markup.add(types.InlineKeyboardButton(f"📦 {t[1]}", callback_data=f"template_{t[0]}"))
+    
+    bot.send_message(message.chat.id, text, reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "💰 BUY CREDITS")
+def buy_credits(message):
+    text = """
+╔══════════════════════════════╗
+║      💰 BUY CREDITS         ║
+╠══════════════════════════════╣
+║ 💎 100 CREDITS  →  $4.99    ║
+║ 💎 500 CREDITS  →  $19.99   ║
+║ 💎 1000 CREDITS →  $34.99   ║
+║ 👑 UNLIMITED   →  $99.99    ║
+╠══════════════════════════════╣
+║ ✨ FEATURES:                 ║
+║ ✓ Deploy unlimited bots     ║
+║ ✓ Priority support          ║
+║ ✓ Advanced templates        ║
+║ ✓ 24/7 uptime              ║
+╚══════════════════════════════╝
+
+Contact @aurponmodz to purchase!
+"""
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "📊 DASHBOARD")
+def dashboard(message):
+    user = db.get_user(message.from_user.id)
+    bots = db.get_user_bots(message.from_user.id)
+    stats = get_system_stats()
+    
+    running = len([b for b in bots if b[5] == "Running"])
+    
+    text = f"""
+╔══════════════════════════════╗
+║        📊 DASHBOARD         ║
+╠══════════════════════════════╣
+║ 👤 ACCOUNT                   ║
+║ ├ Status: {'VIP' if user[6] else 'FREE'}                
+║ ├ Credits: {user[4]}                 
+║ ├ Bots: {len(bots)}/{user[5]}              
+║ └ Running: {running}                  
+╠══════════════════════════════╣
+║ 🖥️ SERVER                    ║
+║ ├ CPU: {stats['cpu']:.1f}%                 
+║ ├ RAM: {stats['ram']:.1f}%                 
+║ ├ Disk: {stats['disk']:.1f}%                
+║ └ Uptime: {format_uptime(stats['uptime'])}    
+╠══════════════════════════════╣
+║ 🎁 REFERRAL                  ║
+║ └ Code: <code>{user[7]}</code>           
+╚══════════════════════════════╝
+"""
+    
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "❓ HELP")
+def help_command(message):
+    text = """
+╔══════════════════════════════╗
+║         ❓ HELP             ║
+╠══════════════════════════════╣
+║ 📤 UPLOAD BOT                ║
+║   Upload your Python bot    ║
+║                             ║
+║ 🤖 MY BOTS                   ║
+║   View and manage bots      ║
+║                             ║
+║ ⚡ DEPLOY BOT                ║
+║   Start your bot            ║
+║                             ║
+║ 🎨 TEMPLATES                 ║
+║   Use ready templates       ║
+║                             ║
+║ 💰 BUY CREDITS               ║
+║   Purchase more credits     ║
+║                             ║
+║ 📊 DASHBOARD                 ║
+║   View statistics           ║
+╚══════════════════════════════╝
+
+💬 Support: {Config.SUPPORT_ID}
+📢 Channel: {Config.BOT_USERNAME}
+"""
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "ℹ️ ABOUT")
+def about_command(message):
+    text = f"""
+╔══════════════════════════════╗
+║        ℹ️ ABOUT             ║
+╠══════════════════════════════╣
+║ {Config.BRAND_NAME}             ║
+║ Version: {Config.VERSION}                ║
+╠══════════════════════════════╣
+║ ✨ FEATURES:                 ║
+║ ✓ Easy bot deployment       ║
+║ ✓ AI bot generator          ║
+║ ✓ Template library          ║
+║ ✓ Real-time monitoring      ║
+║ ✓ Referral system           ║
+╠══════════════════════════════╣
+║ 👨‍💻 Developer: aurponmodz     ║
+║ 💬 Support: {Config.SUPPORT_ID}    ║
+╚══════════════════════════════╝
+"""
+    bot.send_message(message.chat.id, text)
+
+# ==================== CALLBACK HANDLERS ====================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    action = call.data
+    
+    if action.startswith("manage_"):
+        bot_id = int(action.split('_')[1])
+        show_bot_details(call, bot_id)
+    
+    elif action.startswith("start_"):
+        bot_id = int(action.split('_')[1])
+        start_bot(call, bot_id)
+    
+    elif action.startswith("stop_"):
+        bot_id = int(action.split('_')[1])
+        stop_bot(call, bot_id)
+    
+    elif action.startswith("restart_"):
+        bot_id = int(action.split('_')[1])
+        restart_bot(call, bot_id)
+    
+    elif action.startswith("stats_"):
+        bot_id = int(action.split('_')[1])
+        show_stats(call, bot_id)
+    
+    elif action.startswith("export_"):
+        bot_id = int(action.split('_')[1])
+        export_bot(call, bot_id)
+    
+    elif action.startswith("delete_"):
+        bot_id = int(action.split('_')[1])
+        delete_bot(call, bot_id)
+    
+    elif action.startswith("template_"):
+        template_id = int(action.split('_')[1])
+        use_template(call, template_id)
+    
+    bot.answer_callback_query(call.id)
+
+def show_bot_details(call, bot_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT id, bot_name, filename, status, start_time, deploy_count FROM bots WHERE id=?", (bot_id,))
+    bot_data = cursor.fetchone()
+    
+    if not bot_data:
+        return
+    
+    uptime = "N/A"
+    if bot_data[3] == "Running" and bot_data[4]:
+        try:
+            start = datetime.strptime(bot_data[4], '%Y-%m-%d %H:%M:%S')
+            uptime = str(datetime.now() - start).split('.')[0]
+        except:
+            pass
+    
+    text = f"""
+╔══════════════════════════════╗
+║      🤖 BOT DETAILS         ║
+╠══════════════════════════════╣
+║ Name: {bot_data[1]}                
+║ File: {bot_data[2]}                
+║ Status: {'🟢 RUNNING' if bot_data[3] == 'Running' else '🔴 STOPPED'}          
+║ Uptime: {uptime}                  
+║ Deploys: {bot_data[5]}                 
+╚══════════════════════════════╝
+"""
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
+                         reply_markup=bot_controls(bot_id, bot_data[3]))
+
+def start_bot(call, bot_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT user_id, bot_name, filename FROM bots WHERE id=?", (bot_id,))
+    bot_data = cursor.fetchone()
+    
+    if not bot_data or bot_data[0] != call.from_user.id:
+        return
+    
+    file_path = Path(Config.PROJECT_DIR) / bot_data[2]
+    if not file_path.exists():
+        bot.answer_callback_query(call.id, "File not found!")
+        return
+    
+    proc = subprocess.Popen(['python', str(file_path)], 
+                           start_new_session=True,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    
+    cursor.execute("UPDATE bots SET pid=?, status='Running', start_time=? WHERE id=?",
+                  (proc.pid, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), bot_id))
+    db.conn.commit()
+    
+    bot.answer_callback_query(call.id, f"✅ {bot_data[1]} started!")
+    show_bot_details(call, bot_id)
+
+def stop_bot(call, bot_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT pid, bot_name FROM bots WHERE id=?", (bot_id,))
+    bot_data = cursor.fetchone()
+    
+    if bot_data and bot_data[0]:
+        try:
+            os.kill(bot_data[0], signal.SIGTERM)
+        except:
+            pass
+    
+    cursor.execute("UPDATE bots SET pid=0, status='Stopped' WHERE id=?", (bot_id,))
+    db.conn.commit()
+    
+    bot.answer_callback_query(call.id, f"⏸ {bot_data[1]} stopped!")
+    show_bot_details(call, bot_id)
+
+def restart_bot(call, bot_id):
+    stop_bot(call, bot_id)
+    time.sleep(1)
+    start_bot(call, bot_id)
+
+def show_stats(call, bot_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT pid, bot_name, status FROM bots WHERE id=?", (bot_id,))
+    bot_data = cursor.fetchone()
+    
+    if not bot_data or bot_data[2] != "Running":
+        bot.answer_callback_query(call.id, "Bot is not running!")
+        return
+    
+    try:
+        proc = psutil.Process(bot_data[0])
+        cpu = proc.cpu_percent(interval=0.5)
+        mem = proc.memory_percent()
+        
+        text = f"""
+╔══════════════════════════════╗
+║      📊 BOT STATS           ║
+╠══════════════════════════════╣
+║ Name: {bot_data[1]}                
+║ PID: {bot_data[0]}                   
+║ CPU: {progress_bar(cpu)} {cpu:.1f}%    
+║ RAM: {progress_bar(mem)} {mem:.1f}%    
+║ Threads: {proc.num_threads()}               
+╚══════════════════════════════╝
+"""
+        bot.send_message(call.message.chat.id, text)
+        
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Error: {str(e)[:50]}")
+
+def export_bot(call, bot_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT bot_name, filename FROM bots WHERE id=?", (bot_id,))
+    bot_data = cursor.fetchone()
+    
+    if not bot_data:
+        return
+    
+    file_path = Path(Config.PROJECT_DIR) / bot_data[1]
+    if file_path.exists():
+        with open(file_path, 'rb') as f:
+            bot.send_document(call.message.chat.id, f, 
+                            caption=f"📦 Exported: {bot_data[0]}")
+        bot.answer_callback_query(call.id, "Bot exported!")
+    else:
+        bot.answer_callback_query(call.id, "File not found!")
+
+def delete_bot(call, bot_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT pid, bot_name, filename FROM bots WHERE id=?", (bot_id,))
+    bot_data = cursor.fetchone()
+    
+    if bot_data and bot_data[0]:
+        try:
+            os.kill(bot_data[0], signal.SIGKILL)
+        except:
+            pass
+    
+    file_path = Path(Config.PROJECT_DIR) / bot_data[2]
+    if file_path.exists():
+        file_path.unlink()
+    
+    cursor.execute("DELETE FROM bots WHERE id=?", (bot_id,))
+    db.conn.commit()
+    
+    bot.answer_callback_query(call.id, f"🗑 {bot_data[1]} deleted!")
+    
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
+    
+    bot.send_message(call.message.chat.id, f"✅ Bot '{bot_data[1]}' deleted.")
+
+def use_template(call, template_id):
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT name, code FROM templates WHERE id=?", (template_id,))
+    template = cursor.fetchone()
+    
+    if not template:
+        return
+    
+    cursor.execute("UPDATE templates SET downloads=downloads+1 WHERE id=?", (template_id,))
+    db.conn.commit()
+    
+    filename = f"template_{uuid.uuid4().hex[:8]}.py"
+    file_path = Path(Config.PROJECT_DIR) / filename
+    file_path.write_text(template[1])
+    
+    cursor.execute("INSERT INTO bots (user_id, bot_name, filename, status) VALUES (?, ?, ?, ?)",
+                  (call.from_user.id, f"Template: {template[0]}", filename, "Uploaded"))
+    db.conn.commit()
+    
+    bot.answer_callback_query(call.id, f"✅ Template '{template[0]}' added!")
+    bot.send_message(call.message.chat.id, 
+                    f"✅ Template '{template[0]}' saved!\n\nUse 'DEPLOY BOT' to start it.",
+                    reply_markup=main_menu())
+
+# ==================== FLASK ROUTES ====================
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "brand": Config.BRAND_NAME,
+        "version": Config.VERSION,
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "healthy"})
+
+# ==================== BACKGROUND TASKS ====================
+def cleanup_processes():
+    """Clean up orphaned processes"""
+    while True:
+        try:
+            cursor = db.conn.cursor()
+            cursor.execute("SELECT id, pid FROM bots WHERE status='Running'")
+            running = cursor.fetchall()
+            
+            for bot_id, pid in running:
+                if pid:
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        cursor.execute("UPDATE bots SET status='Stopped', pid=0 WHERE id=?", (bot_id,))
+                        db.conn.commit()
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+        
+        time.sleep(60)
+
+# ==================== MAIN ====================
+def run_bot():
+    """Run Telegram bot with proper error handling"""
+    logger.info(f"Starting {Config.BRAND_NAME} v{Config.VERSION}")
+    
+    # Remove webhook first (important for polling)
+    try:
+        bot.remove_webhook()
+        logger.info("Webhook removed successfully")
+    except Exception as e:
+        logger.error(f"Failed to remove webhook: {e}")
+    
+    time.sleep(2)  # Wait for webhook removal
+    
+    # Start polling with error handling
+    while True:
+        try:
+            logger.info("Starting bot polling...")
+            bot.infinity_polling(timeout=30, long_polling_timeout=30)
+        except Exception as e:
+            logger.error(f"Bot polling error: {e}")
+            logger.info("Restarting polling in 10 seconds...")
+            time.sleep(10)
+
+if __name__ == '__main__':
+    # Start cleanup thread
+    cleanup_thread = threading.Thread(target=cleanup_processes, daemon=True)
+    cleanup_thread.start()
+    logger.info("Cleanup thread started")
+    
+    # Start bot thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logger.info("Bot thread started")
+    
+    # Start Flask server
+    logger.info(f"Starting Flask server on port {Config.PORT}")
+    app.run(host='0.0.0.0', port=Config.PORT, debug=False)    # Paths
     PROJECT_DIR = 'projects'
     DB_NAME = 'aurpon_bot.db'
     LOGS_DIR = 'logs'
